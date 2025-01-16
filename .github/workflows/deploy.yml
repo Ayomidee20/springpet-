@@ -5,50 +5,50 @@ on:
     branches:
       - main
 
-env:
-  AWS_REGION: "us-east-1"
-  ECR_URL: "014498631401.dkr.ecr.us-east-1.amazonaws.com"
-  IMAGE_TAG: "${{ github.sha }}"
-
 jobs:
   build-and-deploy:
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-22.04
     steps:
-    # Step 1: Checkout the code
-    - name: Checkout Code
-      uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v2
 
-    # Step 2: Set up AWS Credentials
-    - name: Set up AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Set up AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-    # Step 3: Log in to Amazon ECR
-    - name: Log in to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v1
 
-    # Step 4: Deploy to EC2
-    - name: Deploy to EC2
-      env:
-        EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-        EC2_PUBLIC_IP: ${{ secrets.EC2_PUBLIC_IP }}
-      run: |
-        # Save the SSH key from GitHub secrets to a file
-        echo "$EC2_SSH_KEY" > ec2-key.pem
-        chmod 400 ec2-key.pem  # Ensure the key has correct permissions
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2-key.pem
+          chmod 600 ~/.ssh/ec2-key.pem
+          eval $(ssh-agent -s)
+          ssh-add ~/.ssh/ec2-key.pem
+          echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
 
-        # Test SSH access (optional, for troubleshooting)
-        ssh -o StrictHostKeyChecking=no -i ec2-key.pem ec2-user@${{ secrets.EC2_PUBLIC_IP }} "echo SSH connection successful"
-
-        # SSH into EC2 and perform docker pull and run
-        ssh -o StrictHostKeyChecking=no -i ec2-key.pem ec2-user@${{ secrets.EC2_PUBLIC_IP }} << EOF
-        docker pull $ECR_URL/spring-petclinic:$IMAGE_TAG
-        docker stop petclinic || true
-        docker rm petclinic || true
-        docker run -d -p 80:8080 --name petclinic $ECR_URL/spring-petclinic:$IMAGE_TAG
-        EOF
+      - name: Deploy to EC2
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          ECR_REGISTRY: ${{ secrets.ECR_REPOSITORY_URI }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Test SSH connection first
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/ec2-key.pem ec2-user@${EC2_HOST} 'echo "SSH connection successful"'
+          
+          # Create deployment script
+          echo "#!/bin/bash
+          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+          docker pull ${ECR_REGISTRY}:${IMAGE_TAG}
+          docker stop petclinic || true
+          docker rm petclinic || true
+          docker run -d --name petclinic -p 8080:8080 ${ECR_REGISTRY}:${IMAGE_TAG}
+          " > deploy.sh
+          
+          # Copy and execute deployment script
+          scp -i ~/.ssh/ec2-key.pem deploy.sh ec2-user@${EC2_HOST}:~/deploy.sh
+          ssh -i ~/.ssh/ec2-key.pem ec2-user@${EC2_HOST} 'chmod +x ~/deploy.sh && ~/deploy.sh'
