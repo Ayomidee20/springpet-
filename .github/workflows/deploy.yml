@@ -18,19 +18,38 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: 'us-east-1'    # You can either hardcode the region or use a secret
+          aws-region: 'us-east-1'  # Specify your AWS region here
 
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Set up SSH key
+      - name: Set up SSH key and known hosts
         run: |
+          # Create .ssh directory with correct permissions
           mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          
+          # Save the SSH key with correct permissions
           echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/ec2-key.pem
           chmod 600 ~/.ssh/ec2-key.pem
+          
+          # Start ssh-agent and add key
           eval $(ssh-agent -s)
           ssh-add ~/.ssh/ec2-key.pem
-          echo -e "Host *\n\tStrictHostKeyChecking no\n\tUserKnownHostsFile=/dev/null\n" > ~/.ssh/config
+          
+          # Configure SSH to not check host keys (only for trusted environments)
+          echo "Host *
+            StrictHostKeyChecking no
+            UserKnownHostsFile=/dev/null
+            ServerAliveInterval 60" > ~/.ssh/config
+
+      - name: Test SSH Connection
+        run: |
+          # Echo the hostname we're trying to connect to (for debugging)
+          echo "Attempting to connect to ${{ secrets.EC2_HOST }}"
+          
+          # Test the SSH connection with verbose output
+          ssh -v -i ~/.ssh/ec2-key.pem ec2-user@${{ secrets.EC2_HOST }} 'echo "SSH connection successful"'
 
       - name: Deploy to EC2
         env:
@@ -38,17 +57,20 @@ jobs:
           ECR_REGISTRY: ${{ secrets.ECR_REPOSITORY_URI }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          # Test SSH connection first
-          ssh -o StrictHostKeyChecking=no -i ~/.ssh/ec2-key.pem ec2-user@${EC2_HOST} 'echo "SSH connection successful"'
+          if [ -z "$EC2_HOST" ]; then
+            echo "Error: EC2_HOST is not set"
+            exit 1
+          fi
           
           # Create deployment script
-          echo "#!/bin/bash
-          aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
+          cat << 'EOF' > deploy.sh
+          #!/bin/bash
+          aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${ECR_REGISTRY}
           docker pull ${ECR_REGISTRY}:${IMAGE_TAG}
           docker stop petclinic || true
           docker rm petclinic || true
           docker run -d --name petclinic -p 8080:8080 ${ECR_REGISTRY}:${IMAGE_TAG}
-          " > deploy.sh
+          EOF
           
           # Copy and execute deployment script
           scp -i ~/.ssh/ec2-key.pem deploy.sh ec2-user@${EC2_HOST}:~/deploy.sh
